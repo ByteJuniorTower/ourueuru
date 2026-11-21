@@ -23,6 +23,22 @@ return function(it, expect, ctx)
 			expect(type(Strings.en["format_" .. f.id])).toBe("string")
 		end
 		expect(PartyCfg.MaxSize).toBe(4)
+		-- milestone 10: the modes of the Expedition Circle cover every party size once, each size has a server format,
+		-- and the countdown is the 3 to 5 seconds a player needs to see it
+		expect(#PartyCfg.Modes).toBe(3)
+		local covered = {}
+		for _, m in ipairs(PartyCfg.Modes) do
+			expect(type(Strings.en["mode_" .. m.id])).toBe("string")
+			expect(type(Strings.en["mode_" .. m.id .. "_sub"])).toBe("string")
+			for size = m.min, m.max do
+				expect(covered[size]).toBe(nil)
+				covered[size] = m.id
+				expect(Matchmaking.FormatBySize(PartyCfg.Formats, size) ~= nil).toBeTruthy()
+			end
+		end
+		for size = 1, PartyCfg.MaxSize do expect(covered[size] ~= nil).toBeTruthy() end
+		expect(covered[1] == "solo" and covered[2] == "duo" and covered[3] == "squad" and covered[4] == "squad").toBeTruthy()
+		expect(LobbyCfg.CountdownSeconds >= 3 and LobbyCfg.CountdownSeconds <= 5).toBeTruthy()
 		expect(GameCfg.Places.Lobby > 0 and GameCfg.Places.Game > 0 and GameCfg.Places.Lobby ~= GameCfg.Places.Game).toBeTruthy()
 		for key in pairs(Strings.en) do expect(type(Strings.ru[key])).toBe("string") end
 		for key in pairs(Strings.ru) do expect(type(Strings.en[key])).toBe("string") end
@@ -84,18 +100,20 @@ return function(it, expect, ctx)
 	-- stand-in players, a recorder instead of the teleport and a clock the test moves; everything is put back
 	local function fixture(fn)
 		local saved = {MS.Teleporter, Matchmaking.Backend(), Matchmaking.Now, PS.Clock, LobbyCfg.TeleportRetrySeconds, Matchmaking.Attempts}
+		local savedM10 = {LobbyCfg.RequireCircle, LobbyCfg.CountdownSeconds, LobbyCfg.PrivateServerPerParty}
 		local f = {bots = {}, reserved = 0, sends = {}, t = 1000}
+		-- a stand-in stands in the Expedition Circle unless a test moves it out
 		function f.bot(i)
 			local b = {UserId = -9100 - i, Name = "Bot" .. i, DisplayName = "Bot " .. i, Parent = workspace}
 			table.insert(f.bots, b)
 			PS:Enter(b)
+			PS:SetInCircle(b, true)
 			return b
 		end
 		-- a full party led by the first bot
 		function f.party(first, size)
 			local leader = f.bot(first)
-			local format = Matchmaking.FormatBySize(PartyCfg.Formats, size)
-			expect(PS:SetFormat(leader, format.id)).toBe(true)
+			expect(PS:SetMode(leader, PS.ModeOfSize(size).id)).toBe(true)
 			for i = 1, size - 1 do
 				local guest = f.bot(first + i)
 				expect(PS:Invite(leader, guest)).toBe(true)
@@ -120,11 +138,19 @@ return function(it, expect, ctx)
 		Matchmaking.Attempts = 1
 		PS.Clock = function() return f.t end
 		LobbyCfg.TeleportRetrySeconds = 0
+		-- the leader asks to set out and the countdown runs out: what PartyService:Step does then, without the wait
+		function f.setOut(leader)
+			local started, why = PS:SetOut(leader)
+			if not started then return started, why end
+			expect(why).toBe("countdown")
+			return PS:Launch(PS:Get(leader))
+		end
 		local ok, err = pcall(fn, f)
 		for _, b in ipairs(f.bots) do PS:Exit(b) end
 		MS.Teleporter = saved[1]
 		Matchmaking.UseBackend(saved[2])
 		Matchmaking.Now, PS.Clock, LobbyCfg.TeleportRetrySeconds, Matchmaking.Attempts = saved[3], saved[4], saved[5], saved[6]
+		LobbyCfg.RequireCircle, LobbyCfg.CountdownSeconds, LobbyCfg.PrivateServerPerParty = savedM10[1], savedM10[2], savedM10[3]
 		if not ok then error(err, 0) end
 	end
 
@@ -147,12 +173,12 @@ return function(it, expect, ctx)
 		local a, b, c, d = f.bot(1), f.bot(2), f.bot(3), f.bot(4)
 		local party = PS:Get(a)
 		expect(party.leader).toBe(a)
-		expect(party.format).toBe("solo")
+		expect(party.mode).toBe("solo")
 		expect(#party.members).toBe(1)
 		local ok, why = PS:Invite(a, b)
-		expect(why).toBe("full") -- a solo party has one seat
-		expect(PS:SetFormat(a, "duo")).toBe(true)
-		ok, why = PS:SetFormat(a, "septet")
+		expect(why).toBe("solo") -- a Solo party has one seat: the leader has to choose Duo or Squad first
+		expect(PS:SetMode(a, "duo")).toBe(true)
+		ok, why = PS:SetMode(a, "septet")
 		expect(ok).toBe(false)
 		expect(PS:Invite(a, b)).toBe(true)
 		expect(PS:Snapshot(b).invites[1].id).toBe(a.UserId)
@@ -178,15 +204,15 @@ return function(it, expect, ctx)
 		expect(why).toBe("full")
 		ok, why = PS:Invite(b, d)
 		expect(why).toBe("not_leader")
-		ok, why = PS:SetFormat(b, "trio")
+		ok, why = PS:SetMode(b, "squad")
 		expect(why).toBe("not_leader")
-		ok, why = PS:SetFormat(a, "solo")
+		ok, why = PS:SetMode(a, "solo")
 		expect(why).toBe("too_many") -- two Guardians do not fit a solo party
 		-- somebody who is already in a party cannot be invited, and has to leave it before joining another
-		expect(PS:SetFormat(c, "duo")).toBe(true)
+		expect(PS:SetMode(c, "duo")).toBe(true)
 		ok, why = PS:Invite(c, b)
 		expect(why).toBe("busy")
-		expect(PS:SetFormat(a, "trio")).toBe(true)
+		expect(PS:SetMode(a, "squad")).toBe(true)
 		expect(PS:Invite(c, d)).toBe(true)
 		expect(PS:Answer(d, c, true)).toBe(true)
 		expect(PS:Invite(a, c)).toBe(false)
@@ -208,24 +234,25 @@ return function(it, expect, ctx)
 		expect(PS:Get(c).leader).toBe(c)
 	end) end)
 
-	it("M9 set out: only a full party leaves; it gets a server of its format, a house and a ticket for every member", function() fixture(function(f)
+	it("M9 set out: only a party that fits its mode leaves; it gets a server of its format, a house and a ticket for every member", function() fixture(function(f)
 		local leader = f.bot(1)
-		expect(PS:SetFormat(leader, "quartet")).toBe(true)
-		local guests = {f.bot(2), f.bot(3)}
-		for _, g in ipairs(guests) do
-			PS:Invite(leader, g)
-			expect(PS:Answer(g, leader, true)).toBe(true)
-		end
+		expect(PS:SetMode(leader, "squad")).toBe(true)
+		local guests = {f.bot(2)}
+		PS:Invite(leader, guests[1])
+		expect(PS:Answer(guests[1], leader, true)).toBe(true)
 		local ok, why = PS:SetOut(leader)
 		expect(ok).toBe(false)
-		expect(why).toBe("not_full") -- three of four
+		expect(why).toBe("need_more") -- a Squad is three or four, this party is two
 		expect(f.reserved).toBe(0)
 		ok, why = PS:SetOut(guests[1])
 		expect(why).toBe("not_leader")
+		guests[2] = f.bot(3)
+		PS:Invite(leader, guests[2])
+		expect(PS:Answer(guests[2], leader, true)).toBe(true)
 		local fourth = f.bot(4)
 		PS:Invite(leader, fourth)
 		expect(PS:Answer(fourth, leader, true)).toBe(true)
-		expect(PS:SetOut(leader)).toBe(true)
+		expect(f.setOut(leader)).toBe(true)
 		expect(f.reserved).toBe(1)
 		expect(f.reservedPlace).toBe(GameCfg.Places.Game)
 		expect(#f.sends).toBe(1)
@@ -247,7 +274,7 @@ return function(it, expect, ctx)
 		end
 		-- while the party is on its way nothing about it can be changed
 		expect(PS:Get(leader).launching).toBe(true)
-		ok, why = PS:SetFormat(leader, "quartet")
+		ok, why = PS:SetMode(leader, "squad")
 		expect(why).toBe("launching")
 		ok, why = PS:Kick(leader, fourth)
 		expect(why).toBe("launching")
@@ -263,38 +290,38 @@ return function(it, expect, ctx)
 
 	it("M9 matching: parties of one format fill a server house by house, other formats and full servers get new ones", function() fixture(function(f)
 		local duoA = f.party(1, 2)
-		expect(PS:SetOut(duoA)).toBe(true)
+		expect(f.setOut(duoA)).toBe(true)
 		local duoB = f.party(3, 2)
-		expect(PS:SetOut(duoB)).toBe(true)
+		expect(f.setOut(duoB)).toBe(true)
 		expect(f.reserved).toBe(1) -- the second duo goes to the server of the first
 		expect(f.sends[2].code).toBe("code1")
 		expect(Matchmaking.TakeTicket(duoB.UserId, "server1").host).toBe(duoB.UserId)
 		local solo = f.bot(5)
-		expect(PS:SetOut(solo)).toBe(true)
+		expect(f.setOut(solo)).toBe(true)
 		expect(f.reserved).toBe(2) -- a solo player needs a solo server
 		expect(f.sends[3].code).toBe("code2")
 		expect(Matchmaking.Backend().Get(Matchmaking.Maps.Servers .. "solo", "server2").houses).toBe(20)
 		-- the duo server reports that every house is taken: the next duo opens a new server
 		Matchmaking.Heartbeat("duo", "server1", "code1", 10, 0, 20, {duoA.UserId, duoB.UserId})
 		local duoC = f.party(6, 2)
-		expect(PS:SetOut(duoC)).toBe(true)
+		expect(f.setOut(duoC)).toBe(true)
 		expect(f.reserved).toBe(3)
 		expect(f.sends[4].code).toBe("code3")
 		-- six trio parties fit one trio server (18 players), the seventh gets another
 		local before = f.reserved
 		for i = 1, 7 do
 			local trio = f.party(10 + i * 3, 3)
-			expect(PS:SetOut(trio)).toBe(true)
+			expect(f.setOut(trio)).toBe(true)
 			expect(f.reserved).toBe(before + (i <= 6 and 1 or 2))
 		end
 	end) end)
 
 	it("M9 failure: when the server or the teleport is refused, the party stays in the lobby and its house is free again", function() fixture(function(f)
 		local first = f.party(1, 2)
-		expect(PS:SetOut(first)).toBe(true)
+		expect(f.setOut(first)).toBe(true)
 		local leader = f.party(3, 2)
 		f.failSend = true
-		local ok, why = PS:SetOut(leader)
+		local ok, why = f.setOut(leader)
 		expect(ok).toBe(false)
 		expect(why).toBe("teleport")
 		expect(PS:Get(leader).launching).toBe(false)
@@ -304,12 +331,12 @@ return function(it, expect, ctx)
 		f.failSend = false
 		f.failReserve = true
 		local solo = f.bot(5)
-		ok, why = PS:SetOut(solo)
+		ok, why = f.setOut(solo)
 		expect(ok).toBe(false)
 		expect(why).toBe("server")
 		expect(PS:Get(solo).launching).toBe(false)
 		f.failReserve = false
-		expect(PS:SetOut(leader)).toBe(true) -- and the same party can try again
+		expect(f.setOut(leader)).toBe(true) -- and the same party can try again
 		expect(f.sends[#f.sends].code).toBe("code1")
 	end) end)
 
@@ -340,6 +367,137 @@ return function(it, expect, ctx)
 		expect(why).toBe("gone")
 		expect(PS:Snapshot(other).rejoin).toBe(nil)
 	end) end)
+
+	it("M10 countdown: the leader starts it when the party is ready, can cancel it, and a change in the party stops it", function() fixture(function(f)
+		local leader = f.bot(1)
+		expect(PS:SetMode(leader, "duo")).toBe(true)
+		local ok, why = PS:SetOut(leader)
+		expect(ok).toBe(false)
+		expect(why).toBe("need_more")
+		local snap = PS:Snapshot(leader)
+		expect(snap.party.ready).toBe(false)
+		expect(snap.party.status[1]).toBe("lobby_status_need_more")
+		expect(snap.party.status[2]).toBe(2) -- a Duo is two Guardians
+		expect(snap.party.status[3]).toBe(1) -- one more to go
+		local guest = f.bot(2)
+		expect(PS:Invite(leader, guest)).toBe(true)
+		expect(PS:Answer(guest, leader, true)).toBe(true)
+		-- everyone has to stand in the Expedition Circle; the server says who does
+		PS:SetInCircle(guest, false)
+		ok, why = PS:SetOut(leader)
+		expect(ok).toBe(false)
+		expect(why).toBe("need_circle")
+		expect(PS:Snapshot(leader).party.status[1]).toBe("lobby_status_need_circle")
+		expect(PS:Snapshot(leader).party.members[2].inCircle).toBe(false)
+		PS:SetInCircle(guest, true)
+		expect(PS:Snapshot(guest).party.ready).toBe(true)
+		expect(PS:Snapshot(guest).inCircle).toBe(true)
+		-- only the leader starts the countdown and only the leader cancels it
+		ok, why = PS:SetOut(guest)
+		expect(why).toBe("not_leader")
+		ok, why = PS:SetOut(leader)
+		expect(ok).toBe(true)
+		expect(why).toBe("countdown")
+		expect(PS:Snapshot(guest).party.countdownEnds ~= nil).toBeTruthy()
+		ok, why = PS:SetOut(leader)
+		expect(why).toBe("countdown") -- it is running already
+		ok, why = PS:SetMode(leader, "squad")
+		expect(why).toBe("countdown")
+		ok, why = PS:CancelCountdown(guest)
+		expect(why).toBe("not_leader")
+		f.t += LobbyCfg.CountdownSeconds - 1
+		PS:Step(f.t, true)
+		expect(#f.sends).toBe(0) -- still counting: nobody is teleported yet
+		expect(PS:CancelCountdown(leader)).toBe(true)
+		f.t += 10
+		PS:Step(f.t, true)
+		expect(#f.sends).toBe(0) -- cancelled
+		expect(PS:Get(leader).countdown).toBe(nil)
+		expect(PS:Snapshot(leader).party.countdownEnds).toBe(nil)
+		ok, why = PS:CancelCountdown(leader)
+		expect(ok).toBe(false)
+		-- a member steps out of the circle during the countdown: it stops
+		expect(PS:SetOut(leader)).toBe(true)
+		PS:SetInCircle(guest, false)
+		PS:Step(f.t + 1, true)
+		expect(PS:Get(leader).countdown).toBe(nil)
+		f.t += 10
+		PS:Step(f.t, true)
+		expect(#f.sends).toBe(0)
+		PS:SetInCircle(guest, true)
+		-- a member leaves the party during the countdown: it stops and the party is not ready any more
+		expect(PS:SetOut(leader)).toBe(true)
+		expect(PS:Leave(guest)).toBe(true)
+		expect(PS:Get(leader).countdown).toBe(nil)
+		ok, why = PS:SetOut(leader)
+		expect(why).toBe("need_more")
+		-- the countdown runs out: the whole party is teleported together, once
+		expect(PS:Invite(leader, guest)).toBe(true)
+		expect(PS:Answer(guest, leader, true)).toBe(true)
+		expect(PS:SetOut(leader)).toBe(true)
+		f.t += LobbyCfg.CountdownSeconds
+		PS:Step(f.t, true)
+		expect(#f.sends).toBe(1)
+		expect(#f.sends[1].players).toBe(2)
+		expect(f.sends[1].place).toBe(GameCfg.Places.Game)
+		expect(PS:Get(leader).launching).toBe(true)
+		PS:Step(f.t + 1, true)
+		expect(#f.sends).toBe(1)
+		expect(Matchmaking.TakeTicket(guest.UserId, "server1").format).toBe("duo")
+	end) end)
+
+	it("M10 modes: a Squad of three goes to a trio server and a Squad of four to a quartet server; invitations follow the mode", function() fixture(function(f)
+		expect(PS.ModeOfSize(1).id).toBe("solo")
+		expect(PS.ModeOfSize(2).id).toBe("duo")
+		expect(PS.ModeOfSize(3).id).toBe("squad")
+		expect(PS.ModeOfSize(4).id).toBe("squad")
+		expect(PS.ModeOfSize(5)).toBe(nil)
+		local three = f.party(1, 3)
+		expect(PS:Get(three).mode).toBe("squad")
+		expect(PS:Snapshot(three).party.max).toBe(4)
+		expect(PS:Snapshot(three).party.ready).toBe(true) -- the fourth seat is optional
+		expect(f.setOut(three)).toBe(true)
+		expect(Matchmaking.TakeTicket(three.UserId, "server1").format).toBe("trio")
+		expect(Matchmaking.Backend().Get(Matchmaking.Maps.Servers .. "trio", "server1").houses).toBe(6)
+		local four = f.party(5, 4)
+		local fifth = f.bot(9)
+		local ok, why = PS:Invite(four, fifth)
+		expect(why).toBe("full") -- a party is four Guardians at most
+		expect(f.setOut(four)).toBe(true)
+		expect(Matchmaking.TakeTicket(four.UserId, "server2").format).toBe("quartet")
+		expect(Matchmaking.Backend().Get(Matchmaking.Maps.Servers .. "quartet", "server2").houses).toBe(5)
+		-- an invitation nobody answers goes away by itself
+		local lead = f.bot(10)
+		expect(PS:SetMode(lead, "duo")).toBe(true)
+		expect(PS:Invite(lead, fifth)).toBe(true)
+		f.t += LobbyCfg.InviteSeconds + 1
+		PS:Step(f.t, true)
+		expect(#PS:Snapshot(fifth).invites).toBe(0)
+		ok, why = PS:Answer(fifth, lead, true)
+		expect(why).toBe("expired")
+		-- the switch for a reserved server of its own for every party (off by default: decision 2)
+		expect(LobbyCfg.PrivateServerPerParty).toBe(false)
+		LobbyCfg.PrivateServerPerParty = true
+		local before = f.reserved
+		expect(f.setOut(f.party(20, 2))).toBe(true)
+		expect(f.setOut(f.party(22, 2))).toBe(true)
+		expect(f.reserved).toBe(before + 2)
+	end) end)
+
+	it("M10 circle: the server measures who stands in the Expedition Circle of the built lobby", function()
+		local center, radius = PS.CircleArea()
+		expect(center ~= nil).toBeTruthy()
+		local circle = workspace.Lobby.ExpeditionCircle
+		expect(radius).toBe(circle:GetAttribute("Radius") + LobbyCfg.CircleMargin)
+		expect(PS.IsInside(center + Vector3.new(radius - 0.5, 3, 0), center, radius)).toBe(true)
+		expect(PS.IsInside(center + Vector3.new(radius + 0.5, 3, 0), center, radius)).toBe(false)
+		expect(PS.IsInside(center + Vector3.new(0, 40, 0), center, radius)).toBe(false) -- not from above
+		expect(circle:FindFirstChild("Runes") ~= nil).toBeTruthy()
+		-- nobody appears in the circle: the spawn points are on the plaza
+		for i = 1, 8 do
+			expect(PS.IsInside(workspace.Lobby["Spawn_" .. i].Position, center, radius)).toBe(false)
+		end
+	end)
 
 	it("M9 live: the player in this session has a solo party and sees the others in the lobby", function() fixture(function(f)
 		local player = game:GetService("Players"):GetPlayers()[1]
