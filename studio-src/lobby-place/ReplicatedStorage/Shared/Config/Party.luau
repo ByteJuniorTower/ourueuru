@@ -1,5 +1,6 @@
 -- Party formats (design doc 2.1 and 2.2, decision 2). The same numbers as in Config.Party of the game place:
--- a party of `size` Guardians goes to a server of its format, which has `houses` houses
+-- a team of `size` Guardians goes to a server of its format, which has `houses` houses.
+-- Milestone 10: every format has a matchmaking zone in the lobby (Config.Lobby.Zones, the same ids)
 return {
 	MaxSize = 4,
 	ServerPlayers = 20,
