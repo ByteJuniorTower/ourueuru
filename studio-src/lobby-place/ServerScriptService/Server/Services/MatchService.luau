@@ -59,9 +59,13 @@ end
 -- A server of the format with a house for this host: an existing one first, otherwise a new reserved server.
 -- Returns the server id, its access code and whether it is new
 function MatchService:FindServer(format, hostUserId)
-	for _, candidate in ipairs(Matchmaking.FindOpen(format.id)) do
-		local entry = Matchmaking.Claim(format.id, candidate.id, hostUserId)
-		if entry then return candidate.id, entry.code, false end
+	-- Milestone 10: with Lobby.PrivateServerPerParty every party gets a reserved server of its own.
+	-- By default (decision 2) parties of one format fill a reserved server house by house
+	if not LobbyCfg.PrivateServerPerParty then
+		for _, candidate in ipairs(Matchmaking.FindOpen(format.id)) do
+			local entry = Matchmaking.Claim(format.id, candidate.id, hostUserId)
+			if entry then return candidate.id, entry.code, false end
+		end
 	end
 	local ok, code, serverId = pcall(MatchService.Teleporter.Reserve, GameCfg.Places.Game)
 	if not ok or type(code) ~= "string" or type(serverId) ~= "string" then
